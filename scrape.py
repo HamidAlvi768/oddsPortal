@@ -83,38 +83,23 @@ def parse_match_page(driver, match_url):
         away_team = data.get('eventData', {}).get('away')
         start_timestamp = data.get('eventBody', {}).get('startDate')
         match_date = datetime.fromtimestamp(start_timestamp).strftime('%d.%m.%Y %H:%M') if start_timestamp else None
-        odds_data = {"1X2 - Full time": {}, "1X2 - 1st half": {}}
-        bookmakers = ["Pinnacle", "bet365", "1xBet"]
-        bet_type_tabs = {
-            "1X2 - Full time": ["Full Time", "1X2"],
-            "1X2 - 1st half": ["1st Half", "1X2"]
-        }
-        tables = soup.find_all('table', class_='table-main')
-        print(f"Found {len(tables)} odds tables on page: {match_url}")
-        for idx, table in enumerate(tables):
-            print(f"\n--- Odds Table {idx} HTML (truncated) ---\n{str(table)[:1000]}\n...")
-        for bet_type, (tab_label, odds_label) in bet_type_tabs.items():
-            if bet_type == "1X2 - Full time" and len(tables) > 0:
-                table = tables[0]
-            elif bet_type == "1X2 - 1st half" and len(tables) > 1:
-                table = tables[1]
-            else:
-                table = None
-            if table:
-                print(f"\nBookmakers found in {bet_type}:")
-                for row in table.find_all('tr'):
-                    cells = row.find_all('td')
-                    if len(cells) >= 6:
-                        bookmaker_name = cells[1].get_text(strip=True)
-                        print(f"  - {bookmaker_name}")
-                        if bookmaker_name in bookmakers:
-                            try:
-                                odds_1 = cells[2].get_text(strip=True)
-                                odds_x = cells[3].get_text(strip=True)
-                                odds_2 = cells[4].get_text(strip=True)
-                                odds_data[bet_type][bookmaker_name] = {"1": odds_1, "X": odds_x, "2": odds_2}
-                            except Exception as e:
-                                print(f"Error extracting odds for {bookmaker_name} on {bet_type}: {e}")
+
+        odds_data = {}
+        # Find all bookmaker rows
+        rows = soup.find_all('div', attrs={'data-testid': 'over-under-expanded-row'})
+        for row in rows:
+            # Extract bookmaker name
+            bookmaker_tag = row.find('p', attrs={'data-testid': 'outrights-expanded-bookmaker-name'})
+            bookmaker = bookmaker_tag.get_text(strip=True) if bookmaker_tag else None
+            if not bookmaker:
+                continue
+            # Extract odds (1, X, 2)
+            odds_tags = row.find_all('div', attrs={'data-testid': 'odd-container'})
+            odds = [odd_tag.find('p').get_text(strip=True) if odd_tag.find('p') else None for odd_tag in odds_tags]
+            if len(odds) >= 3:
+                odds_data[bookmaker] = {"1": odds[0], "X": odds[1], "2": odds[2]}
+                print(f"Bookmaker: {bookmaker}, Odds: {odds[:3]}")
+
         match_record = {
             "Date": match_date,
             "Home Team": home_team,
@@ -158,11 +143,13 @@ def format_data_for_excel(all_matches_data):
             ("Result 1st half", "", ""): "",
             ("Result 2nd half", "", ""): ""
         }
-        # Odds extraction placeholder: fill with empty for now
         for bet_type, _, _ in bet_types:
             for bookmaker in bookmakers:
                 for outcome in outcomes:
-                    base_row[(bet_type, bookmaker, outcome)] = ""
+                    odds = ""
+                    if "Odds" in record and bookmaker in record["Odds"]:
+                        odds = record["Odds"][bookmaker].get(outcome, "")
+                    base_row[(bet_type, bookmaker, outcome)] = odds
         processed_rows.append(base_row)
     df = pd.DataFrame(processed_rows, columns=pd.MultiIndex.from_tuples(columns))
     return df
