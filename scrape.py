@@ -46,10 +46,9 @@ def setup_driver():
 def get_match_urls(driver, league_url):
     print(f"Navigating to league page: {league_url}")
     driver.get(league_url)
-    urls = []
+    matches = []
     wait = WebDriverWait(driver, 20)
     time.sleep(2)
-    # Parse the first page for pagination
     soup = BeautifulSoup(driver.page_source, 'html.parser')
     pagination_links = soup.find_all('a', class_='pagination-link', attrs={'data-number': True})
     if pagination_links:
@@ -58,28 +57,25 @@ def get_match_urls(driver, league_url):
     else:
         max_page = 1
     print(f"Found {max_page} pages of results.")
-    def extract_urls_from_soup(soup):
-        page_urls = []
-        # Map URLs to (home, away) for diagnostics
-        url_to_teams = {}
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if re.match(r"^/football/[\w-]+/[\w-]+(?:-[\d]{4}-[\d]{4})?/([\w-]+-){2,}[\w\d]+/?$", href):
-                if href.startswith('http'):
-                    url = href
-                else:
-                    url = 'https://www.oddsportal.com' + href
-                # Try to get home/away teams from the same row
-                parent = a.find_parent('div', {'data-testid': 'game-row'})
-                if parent:
-                    participants = parent.find_all('p', class_='participant-name')
-                    if len(participants) == 2:
-                        home = participants[0].get_text(strip=True)
-                        away = participants[1].get_text(strip=True)
-                        url_to_teams[url] = (home, away)
-                page_urls.append(url)
-        return page_urls, url_to_teams
-    all_url_to_teams = {}
+    def extract_matches_from_soup(soup):
+        match_list = []
+        for row in soup.find_all('div', {'data-testid': 'game-row'}):
+            participants = row.find_all('p', class_='participant-name')
+            if len(participants) == 2:
+                home = participants[0].get_text(strip=True)
+                away = participants[1].get_text(strip=True)
+                # Try to find a clickable match URL in this row
+                a_tag = row.find('a', href=True)
+                url = None
+                if a_tag:
+                    href = a_tag['href']
+                    if href.startswith('http'):
+                        url = href
+                    else:
+                        url = 'https://www.oddsportal.com' + href
+                match_list.append({'home': home, 'away': away, 'url': url})
+        return match_list
+    all_matches = []
     for page in range(1, max_page + 1):
         if page == 1:
             page_soup = soup
@@ -89,20 +85,13 @@ def get_match_urls(driver, league_url):
             driver.get(paged_url)
             time.sleep(2)
             page_soup = BeautifulSoup(driver.page_source, 'html.parser')
-        page_urls, url_to_teams = extract_urls_from_soup(page_soup)
-        for url in page_urls:
-            if url not in urls:
-                urls.append(url)
-        all_url_to_teams.update(url_to_teams)
-    print(f"Found {len(urls)} match URLs across all pages.")
-    print("Match URLs and teams found:")
-    for url in urls:
-        teams = all_url_to_teams.get(url)
-        if teams:
-            print(f"{url} | {teams[0]} vs {teams[1]}")
-        else:
-            print(f"{url} | [Teams not found]")
-    return urls
+        match_list = extract_matches_from_soup(page_soup)
+        all_matches.extend(match_list)
+    print(f"Found {len(all_matches)} matches across all pages.")
+    print("Matches found (home vs away, url):")
+    for m in all_matches:
+        print(f"{m['home']} vs {m['away']} | {m['url']}")
+    return all_matches
 
 def parse_match_page(driver, match_url):
     print(f"Processing match: {match_url}")
@@ -197,18 +186,22 @@ if __name__ == "__main__":
     try:
         for sheet_name, league_url in LEAGUE_URLS.items():
             print(f"\n--- Scraping {sheet_name} ---")
-            match_urls = get_match_urls(driver, league_url)
-            if not match_urls:
-                print(f"No match URLs found for {sheet_name}. Skipping.")
+            match_infos = get_match_urls(driver, league_url)
+            if not match_infos:
+                print(f"No matches found for {sheet_name}. Skipping.")
                 continue
             league_data = []
-            for url in match_urls:
-                match_data = parse_match_page(driver, url)
-                if match_data:
-                    league_data.append(match_data)
-                    parsed_matches.append((match_data["Home Team"], match_data["Away Team"]))
+            for match in match_infos:
+                url = match['url']
+                if url:
+                    match_data = parse_match_page(driver, url)
+                    if match_data:
+                        league_data.append(match_data)
+                        parsed_matches.append((match_data["Home Team"], match_data["Away Team"]))
+                    else:
+                        print(f"Failed to parse match: {url}")
                 else:
-                    print(f"Failed to parse match: {url}")
+                    print(f"No URL for match: {match['home']} vs {match['away']}")
                 time.sleep(1)
             all_data[sheet_name] = league_data
     finally:
