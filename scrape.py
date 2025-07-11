@@ -10,13 +10,14 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+import re
 
 # Configuration
 LEAGUE_URLS = {
     # "Premier League": "https://www.oddsportal.com/football/england/premier-league/",
     # "Ligue 1": "https://www.oddsportal.com/football/france/ligue-1/",
     # "Bundesliga": "https://www.oddsportal.com/football/germany/bundesliga/",
-    "LaLiga": "https://www.oddsportal.com/football/spain/laliga/",
+    "LaLiga": "https://www.oddsportal.com/football/spain/laliga-2024-2025/results/",
     # "Serie A": "https://www.oddsportal.com/football/italy/serie-a/"
 }
 
@@ -47,25 +48,60 @@ def get_match_urls(driver, league_url):
     driver.get(league_url)
     urls = []
     wait = WebDriverWait(driver, 20)
-    try:
-        cookie_button = wait.until(EC.element_to_be_clickable((By.ID, 'onetrust-accept-btn-handler')))
-        cookie_button.click()
-        print("Accepted cookies.")
-        time.sleep(2)
-    except Exception:
-        print("Cookie banner not found or could not be clicked. Continuing...")
-    try:
-        wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, 'div.eventRow')))
-        time.sleep(3)
-        match_elements = driver.find_elements(By.CSS_SELECTOR, 'div.eventRow a')
-        for elem in match_elements:
-            href = elem.get_attribute('href')
-            # Only add URLs that look like real match pages (contain a dash and not just /football/ or /england/ etc)
-            if href and '/football/' in href and '-' in href.split('/')[-2] and href not in urls:
-                urls.append(href)
-        print(f"Found {len(urls)} match URLs.")
-    except Exception as e:
-        print(f"Error finding match URLs on {league_url}: {e}")
+    time.sleep(2)
+    # Parse the first page for pagination
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    pagination_links = soup.find_all('a', class_='pagination-link', attrs={'data-number': True})
+    if pagination_links:
+        page_numbers = [int(link['data-number']) for link in pagination_links if link['data-number'].isdigit()]
+        max_page = max(page_numbers) if page_numbers else 1
+    else:
+        max_page = 1
+    print(f"Found {max_page} pages of results.")
+    def extract_urls_from_soup(soup):
+        page_urls = []
+        # Map URLs to (home, away) for diagnostics
+        url_to_teams = {}
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            if re.match(r"^/football/[\w-]+/[\w-]+(?:-[\d]{4}-[\d]{4})?/([\w-]+-){2,}[\w\d]+/?$", href):
+                if href.startswith('http'):
+                    url = href
+                else:
+                    url = 'https://www.oddsportal.com' + href
+                # Try to get home/away teams from the same row
+                parent = a.find_parent('div', {'data-testid': 'game-row'})
+                if parent:
+                    participants = parent.find_all('p', class_='participant-name')
+                    if len(participants) == 2:
+                        home = participants[0].get_text(strip=True)
+                        away = participants[1].get_text(strip=True)
+                        url_to_teams[url] = (home, away)
+                page_urls.append(url)
+        return page_urls, url_to_teams
+    all_url_to_teams = {}
+    for page in range(1, max_page + 1):
+        if page == 1:
+            page_soup = soup
+        else:
+            paged_url = league_url.split('#')[0] + f"#/page/{page}/"
+            print(f"Navigating to page {page}: {paged_url}")
+            driver.get(paged_url)
+            time.sleep(2)
+            page_soup = BeautifulSoup(driver.page_source, 'html.parser')
+        page_urls, url_to_teams = extract_urls_from_soup(page_soup)
+        for url in page_urls:
+            if url not in urls:
+                urls.append(url)
+        all_url_to_teams.update(url_to_teams)
+    print(f"Found {len(urls)} match URLs across all pages.")
+    print("Match URLs and teams found:")
+    for url in urls:
+        teams = all_url_to_teams.get(url)
+        if teams:
+            print(f"{url} | {teams[0]} vs {teams[1]}")
+        else:
+            print(f"{url} | [Teams not found]")
     return urls
 
 def parse_match_page(driver, match_url):
@@ -157,6 +193,7 @@ def format_data_for_excel(all_matches_data):
 if __name__ == "__main__":
     driver = setup_driver()
     all_data = {}
+    parsed_matches = []  # For logging (home, away) pairs
     try:
         for sheet_name, league_url in LEAGUE_URLS.items():
             print(f"\n--- Scraping {sheet_name} ---")
@@ -169,11 +206,18 @@ if __name__ == "__main__":
                 match_data = parse_match_page(driver, url)
                 if match_data:
                     league_data.append(match_data)
+                    parsed_matches.append((match_data["Home Team"], match_data["Away Team"]))
+                else:
+                    print(f"Failed to parse match: {url}")
                 time.sleep(1)
             all_data[sheet_name] = league_data
     finally:
         print("Closing the browser.")
         driver.quit()
+    # Write parsed (home, away) pairs to a text file for comparison
+    with open("parsed_matches.txt", "w", encoding="utf-8") as f:
+        for home, away in parsed_matches:
+            f.write(f"{home} vs {away}\n")
     if all_data:
         print("\nFormatting data for Excel export...")
         with pd.ExcelWriter("OddsPortal_Scrape_2024-2025.xlsx", engine='openpyxl') as writer:
